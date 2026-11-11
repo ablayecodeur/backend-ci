@@ -1,6 +1,6 @@
 """Règles métier de SamaFile (FIFO, horaires, absence, expiration)."""
 import math
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timezone
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -153,14 +153,27 @@ def approach_notification(people_ahead: Optional[int]) -> Optional[str]:
     return f"Plus que {people_ahead} personnes devant vous. Rapprochez-vous du service."
 
 
+def counter_name_of(db: Session, ticket: models.Ticket) -> Optional[str]:
+    """Nom du guichet qui a appelé le ticket (None tant qu'il n'est pas appelé)."""
+    if ticket.counter_id is None:
+        return None
+    counter = db.get(models.Counter, ticket.counter_id)
+    return counter.name if counter else None
+
+
 def ticket_out(db: Session, ticket: models.Ticket) -> schemas.TicketOut:
     position = position_of(db, ticket)
     people_ahead = position - 1 if position else None
+    counter_name = counter_name_of(db, ticket)
+    message = MESSAGES[ticket.status]
+    if ticket.status == CALLED and counter_name:
+        message = f"Votre ticket est appelé. Présentez-vous au guichet : {counter_name}."
     return schemas.TicketOut(
         id=ticket.id,
         ticket_number=ticket.ticket_number,
         service_id=ticket.service_id,
         counter_id=ticket.counter_id,
+        counter_name=counter_name,
         user_name=ticket.user_name,
         status=ticket.status,
         position=position,
@@ -168,7 +181,7 @@ def ticket_out(db: Session, ticket: models.Ticket) -> schemas.TicketOut:
         notification=approach_notification(people_ahead),
         created_at=ticket.created_at,
         called_at=ticket.called_at,
-        message=MESSAGES[ticket.status],
+        message=message,
     )
 
 
@@ -181,7 +194,9 @@ def get_ticket(db: Session, ticket_id: int) -> models.Ticket:
     return ticket
 
 
-def create_ticket(db: Session, service_id: int, user_name: Optional[str]) -> models.Ticket:
+def create_ticket(
+    db: Session, service_id: int, user_name: Optional[str], user_id: Optional[int] = None
+) -> models.Ticket:
     service = get_service(db, service_id)
     expire_if_needed(db, service)
     if not is_open(service):
@@ -201,6 +216,7 @@ def create_ticket(db: Session, service_id: int, user_name: Optional[str]) -> mod
     ticket = models.Ticket(
         ticket_number=f"{letter}{created_today + 1:03d}",
         service_id=service.id,
+        user_id=user_id,
         user_name=(user_name or "").strip() or None,
         status=WAITING,
         created_at=now,
@@ -313,3 +329,142 @@ def apply_action(
         except ApiError:
             next_ticket = None  # file vide ou guichet inactif : rien à appeler
     return ticket, next_ticket
+
+
+# ---------------------------------------------------------------- tickets d'un usager
+
+def list_user_tickets(
+    db: Session, user_id: int, status: Optional[str] = None, limit: int = 50, offset: int = 0
+) -> schemas.TicketList:
+    """Tickets d'un compte usager, du plus récent au plus ancien."""
+    expire_all(db)
+    query = db.query(models.Ticket).filter(models.Ticket.user_id == user_id)
+    if status is not None:
+        query = query.filter(models.Ticket.status == status)
+    total = query.count()
+    rows = query.order_by(models.Ticket.id.desc()).offset(offset).limit(limit).all()
+    return schemas.TicketList(items=[schemas.TicketItem.model_validate(t) for t in rows], total=total)
+
+
+# ---------------------------------------------------------------- administration des services et guichets
+
+def parse_hhmm(value: str) -> dtime:
+    return datetime.strptime(value, "%H:%M").time()
+
+
+def _check_hours(opening: dtime, closing: dtime) -> None:
+    if opening >= closing:
+        raise ApiError(422, "VALIDATION_ERROR", "L'heure d'ouverture doit être avant l'heure de fermeture.")
+
+
+def create_service(db: Session, payload: schemas.ServiceCreate) -> models.Service:
+    opening, closing = parse_hhmm(payload.opening_time), parse_hhmm(payload.closing_time)
+    _check_hours(opening, closing)
+    service = models.Service(
+        name=payload.name.strip(),
+        opening_time=opening,
+        closing_time=closing,
+        no_show_timeout_seconds=payload.no_show_timeout_seconds,
+        is_active=True,
+    )
+    db.add(service)
+    db.commit()
+    db.refresh(service)
+    return service
+
+
+def update_service(db: Session, service_id: int, data: dict) -> models.Service:
+    service = db.get(models.Service, service_id)
+    if service is None:
+        raise ApiError(404, "SERVICE_NOT_FOUND", "Service introuvable.")
+    opening = parse_hhmm(data["opening_time"]) if data.get("opening_time") else service.opening_time
+    closing = parse_hhmm(data["closing_time"]) if data.get("closing_time") else service.closing_time
+    _check_hours(opening, closing)
+    service.opening_time = opening
+    service.closing_time = closing
+    if data.get("name") is not None:
+        service.name = data["name"].strip()
+    if data.get("no_show_timeout_seconds") is not None:
+        service.no_show_timeout_seconds = data["no_show_timeout_seconds"]
+    if data.get("is_active") is not None:
+        service.is_active = data["is_active"]
+    db.commit()
+    db.refresh(service)
+    return service
+
+
+def counter_out(counter: models.Counter) -> schemas.CounterOut:
+    return schemas.CounterOut(
+        id=counter.id,
+        name=counter.name,
+        service_id=counter.service_id,
+        service_name=counter.service.name,
+        is_active=counter.is_active,
+    )
+
+
+def create_counter(db: Session, name: str, service_id: int) -> models.Counter:
+    service = get_service(db, service_id)
+    counter = models.Counter(name=name.strip(), service_id=service.id)
+    db.add(counter)
+    db.commit()
+    db.refresh(counter)
+    return counter
+
+
+def update_counter(db: Session, counter_id: int, data: dict) -> models.Counter:
+    counter = db.get(models.Counter, counter_id)
+    if counter is None:
+        raise ApiError(404, "COUNTER_NOT_FOUND", "Guichet introuvable.")
+    if data.get("name") is not None:
+        counter.name = data["name"].strip()
+    if data.get("is_active") is not None:
+        counter.is_active = data["is_active"]
+    db.commit()
+    db.refresh(counter)
+    return counter
+
+
+# ---------------------------------------------------------------- statistiques du jour
+
+def stats(db: Session, service_id: Optional[int] = None) -> schemas.StatsOut:
+    expire_all(db, service_id)
+    services_query = db.query(models.Service).filter(models.Service.is_active.is_(True))
+    tickets_query = db.query(models.Ticket).filter(models.Ticket.created_at >= start_of_local_day_utc())
+    if service_id is not None:
+        services_query = services_query.filter(models.Service.id == service_id)
+        tickets_query = tickets_query.filter(models.Ticket.service_id == service_id)
+
+    by_service: dict = {}
+    for ticket in tickets_query.all():
+        by_service.setdefault(ticket.service_id, []).append(ticket)
+
+    items = []
+    for service in services_query.order_by(models.Service.id).all():
+        rows = by_service.get(service.id, [])
+        counts = {status: 0 for status in STATUSES}
+        waits = []
+        for ticket in rows:
+            counts[ticket.status] = counts.get(ticket.status, 0) + 1
+            if ticket.called_at is not None:
+                waits.append((ticket.called_at - ticket.created_at).total_seconds())
+        items.append(
+            schemas.ServiceStats(
+                service_id=service.id,
+                service_name=service.name,
+                total_today=len(rows),
+                waiting=counts[WAITING],
+                called=counts[CALLED],
+                in_progress=counts[IN_PROGRESS],
+                completed=counts[COMPLETED],
+                no_show=counts[NO_SHOW],
+                cancelled=counts[CANCELLED],
+                expired=counts[EXPIRED],
+                average_wait_seconds=round(sum(waits) / len(waits)) if waits else None,
+            )
+        )
+    return schemas.StatsOut(
+        date=now_local().date().isoformat(),
+        total_tickets=sum(i.total_today for i in items),
+        services=items,
+    )
