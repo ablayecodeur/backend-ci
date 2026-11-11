@@ -20,7 +20,7 @@ os.environ["DATABASE_URL"] = _url
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src import logic, models  # noqa: E402
+from src import auth, logic, models, security  # noqa: E402
 from src.database import Base, SessionLocal, engine  # noqa: E402
 from src.main import app  # noqa: E402
 
@@ -47,10 +47,54 @@ def database(clock):
         db.flush()
         db.add(models.Counter(name="Guichet 1", service_id=service.id))
         db.add(models.Counter(name="Guichet 2", service_id=service.id))
+        db.add(
+            models.User(
+                email="admin@test.sn",
+                full_name="Admin Test",
+                password_hash=security.hash_password("AdminPass123"),
+                role=auth.ADMIN,
+                created_at=logic.now_utc(),
+            )
+        )
         db.commit()
     yield
 
 
+def login_client(email, password):
+    """Client HTTP connecté avec ce compte."""
+    c = TestClient(app)
+    response = c.post("/api/auth/login", json={"email": email, "password": password})
+    assert response.status_code == 200, response.text
+    c.headers["Authorization"] = "Bearer " + response.json()["access_token"]
+    return c
+
+
+@pytest.fixture
+def anon_client():
+    """Client sans jeton (visiteur non connecté)."""
+    return TestClient(app)
+
+
 @pytest.fixture
 def client():
-    return TestClient(app)
+    """Client connecté en administrateur : peut tout faire (les tests existants l'utilisent)."""
+    return login_client("admin@test.sn", "AdminPass123")
+
+
+def make_user_client(email="awa@test.sn", full_name="Awa Ndiaye"):
+    """Crée un compte usager par l'inscription publique et renvoie un client connecté avec ce compte."""
+    c = TestClient(app)
+    response = c.post("/api/auth/register", json={"email": email, "password": "Motdepasse1", "full_name": full_name})
+    assert response.status_code == 201, response.text
+    c.headers["Authorization"] = "Bearer " + response.json()["access_token"]
+    return c
+
+
+def make_agent_client(admin, email="agent1@test.sn", counter_id=1):
+    """L'administrateur crée un agent (affecté à un guichet) ; renvoie un client connecté en agent."""
+    payload = {"email": email, "password": "AgentPass123", "full_name": "Agent", "role": "AGENT"}
+    if counter_id is not None:
+        payload["counter_id"] = counter_id
+    response = admin.post("/api/users", json=payload)
+    assert response.status_code == 201, response.text
+    return login_client(email, "AgentPass123")

@@ -5,6 +5,20 @@ from sqlalchemy.orm import relationship
 from .database import Base
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String(254), nullable=False, unique=True, index=True)
+    full_name = Column(String(100), nullable=False)
+    phone = Column(String(30), nullable=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default="USER")  # USER, AGENT ou ADMIN
+    counter_id = Column(Integer, ForeignKey("counters.id"), nullable=True)  # guichet de l'agent
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False)  # UTC
+
+
 class Service(Base):
     __tablename__ = "services"
 
@@ -35,6 +49,7 @@ class Ticket(Base):
     ticket_number = Column(String(10), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
     counter_id = Column(Integer, ForeignKey("counters.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # compte usager propriétaire (facultatif)
     user_name = Column(String(100), nullable=True)
     status = Column(String(20), nullable=False, default="WAITING")
     created_at = Column(DateTime, nullable=False)  # UTC

@@ -78,3 +78,25 @@ def test_counter_queue_lists_waiting_tickets_in_fifo_order(client):
     assert [t["ticket_number"] for t in queue["items"]] == ["A002", "A003"]
     called = client.get("/api/counters/1/tickets", params={"status": "CALLED"}).json()
     assert called["total"] == 1
+
+
+def test_two_counters_never_get_the_same_ticket_and_user_sees_the_calling_counter(client):
+    first, second = new_ticket("Awa"), new_ticket("Moussa")
+    called_1 = client.post("/api/counters/1/next").json()
+    called_2 = client.post("/api/counters/2/next").json()
+    assert {called_1["id"], called_2["id"]} == {first, second}
+    assert called_1["id"] != called_2["id"]  # jamais le même ticket pour deux guichets
+    # ce que voit l'usager : le nom du guichet qui l'appelle
+    assert called_1["counter_name"] == "Guichet 1"
+    assert "Guichet 1" in called_1["message"]
+    assert called_2["counter_name"] == "Guichet 2"
+    ticket = client.get(f"/api/tickets/{first}").json()
+    assert ticket["counter_id"] == 1 and ticket["counter_name"] == "Guichet 1"
+    position = client.get(f"/api/tickets/{first}/position").json()
+    assert position["counter_id"] == 1 and position["counter_name"] == "Guichet 1"
+
+
+def test_waiting_ticket_has_no_counter_yet(client):
+    ticket_id = new_ticket()
+    ticket = client.get(f"/api/tickets/{ticket_id}").json()
+    assert ticket["counter_id"] is None and ticket["counter_name"] is None
