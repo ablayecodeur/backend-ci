@@ -10,7 +10,11 @@ import jwt
 
 # Clé de signature des jetons. En production : définir SECRET_KEY (variable d'environnement).
 # Sans SECRET_KEY, une clé aléatoire est générée au démarrage (les jetons expirent à chaque redémarrage).
-SECRET_KEY = os.getenv("SECRET_KEY") or secrets.token_urlsafe(48)
+_environment = os.getenv("APP_ENV", "development").lower()
+_configured_secret = os.getenv("SECRET_KEY")
+if _environment == "production" and not _configured_secret:
+    raise RuntimeError("SECRET_KEY doit être définie en production.")
+SECRET_KEY = _configured_secret or secrets.token_urlsafe(48)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "480"))  # 8 heures
 

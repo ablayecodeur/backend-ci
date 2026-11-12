@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from src import logic
@@ -265,3 +266,72 @@ def test_reactivation_is_limited_to_once(client, clock):
     refused = client.post(f"/api/tickets/{first['id']}/reactivate")
     assert refused.status_code == 409
     assert error_code(refused) == "REACTIVATION_LIMIT_REACHED"
+
+
+def test_ticket_distribution_cutoff_is_separate_from_service_closing(client, clock):
+    created = client.post("/api/services", json={
+        "name": "État civil",
+        "opening_time": "08:00",
+        "closing_time": "16:00",
+        "ticket_cutoff_time": "11:30",
+    })
+    assert created.status_code == 201, created.text
+    service = created.json()
+    assert service["is_open"] is True
+    assert service["ticket_distribution_open"] is True
+    assert service["ticket_cutoff_time"] == "11:30"
+
+    clock["now"] = clock["now"].replace(hour=12, minute=0)
+    service_view = client.get(f"/api/services/{service['id']}").json()
+    assert service_view["is_open"] is True
+    assert service_view["ticket_distribution_open"] is False
+
+    refused = client.post("/api/tickets", json={
+        "service_id": service["id"],
+        "user_name": "Awa",
+    })
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "SERVICE_CLOSED"
+
+
+def test_in_progress_ticket_expires_at_service_closing(client, clock):
+    ticket = new_ticket(client)
+    call_next(1)
+    started = client.patch(f"/api/tickets/{ticket['id']}/start")
+    assert started.status_code == 200, started.text
+
+    clock["now"] = clock["now"].replace(hour=16, minute=0)
+    response = client.get(f"/api/tickets/{ticket['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "EXPIRED"
+
+
+def test_concurrent_ticket_creation_keeps_ticket_numbers_unique():
+    def create_one(index):
+        with SessionLocal() as db:
+            ticket = logic.create_ticket(db, 1, f"Usager {index}")
+            return ticket.ticket_number
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        numbers = list(pool.map(create_one, range(8)))
+
+    assert len(numbers) == len(set(numbers))
+    assert set(numbers) == {f"A{i:03d}" for i in range(1, 9)}
+
+
+def test_concurrent_calls_on_same_counter_never_assign_two_active_tickets(client):
+    new_ticket(client, "Usager 1")
+    new_ticket(client, "Usager 2")
+
+    def call_once():
+        with SessionLocal() as db:
+            try:
+                return logic.call_next(db, 1).id
+            except logic.ApiError as error:
+                return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: call_once(), range(2)))
+
+    assert sum(isinstance(result, int) for result in results) == 1
+    assert "COUNTER_BUSY" in results

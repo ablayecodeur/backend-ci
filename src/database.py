@@ -8,18 +8,9 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 os.environ["PGCLIENTENCODING"] = "UTF8"
 
 # PostgreSQL conteneurisé (conteneur "postgres_server").
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://projetdevops:projet@postgres_server:5432/samafile",
-
-    #en Local
-    #"postgresql://projetdevops:projet@localhost:5432/samafile",
-)
-
-
-
-# PostgreSQL en déploiement avec Docker Compose (dépôt deployment-cd) :
-# DATABASE_URL = "postgresql://projetdevops:projet@db:5432/samafile"
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL doit être définie dans l’environnement.")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False)

@@ -4,7 +4,7 @@ from datetime import datetime, time as dtime, timezone
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -84,6 +84,11 @@ def is_open(service: models.Service) -> bool:
     return service.opening_time <= now_local().time() < service.closing_time
 
 
+def is_ticket_distribution_open(service: models.Service) -> bool:
+    cutoff = service.ticket_cutoff_time or service.closing_time
+    return service.opening_time <= now_local().time() < cutoff
+
+
 def service_out(service: models.Service) -> schemas.ServiceOut:
     open_now = is_open(service)
     return schemas.ServiceOut(
@@ -91,8 +96,9 @@ def service_out(service: models.Service) -> schemas.ServiceOut:
         name=service.name,
         opening_time=service.opening_time.strftime("%H:%M"),
         closing_time=service.closing_time.strftime("%H:%M"),
+        ticket_cutoff_time=service.ticket_cutoff_time.strftime("%H:%M") if service.ticket_cutoff_time else None,
         is_open=open_now,
-        ticket_distribution_open=open_now,
+        ticket_distribution_open=is_ticket_distribution_open(service),
         no_show_timeout_seconds=service.no_show_timeout_seconds,
     )
 
@@ -109,12 +115,12 @@ def record_status_change(db: Session, ticket: models.Ticket, previous: Optional[
 
 
 def expire_if_needed(db: Session, service: models.Service) -> None:
-    """RM-04 : à la fermeture (ou le lendemain), les tickets WAITING/CALLED passent à EXPIRED."""
+    """RM-04 : à la fermeture (ou le lendemain), tout ticket actif passe à EXPIRED."""
     closed = now_local().time() >= service.closing_time
     today = now_local().date()
     tickets = (
         db.query(models.Ticket)
-        .filter(models.Ticket.service_id == service.id, models.Ticket.status.in_([WAITING, CALLED]))
+        .filter(models.Ticket.service_id == service.id, models.Ticket.status.in_([WAITING, CALLED, IN_PROGRESS]))
         .all()
     )
     changed = False
@@ -212,13 +218,16 @@ def create_ticket(
 ) -> models.Ticket:
     service = get_service(db, service_id)
     expire_if_needed(db, service)
-    if not is_open(service):
+    if not is_ticket_distribution_open(service):
         if now_local().time() < service.opening_time:
             message = f"Le service n'est pas encore ouvert. Ouverture à {service.opening_time:%H:%M}."
         else:
-            message = "Le service est fermé. Aucun ticket ne peut être attribué."
+            cutoff = service.ticket_cutoff_time or service.closing_time
+            message = f"La distribution des tickets est terminée depuis {cutoff:%H:%M}."
         raise ApiError(409, "SERVICE_CLOSED", message)
 
+    # Sérialise la numérotation par service : évite deux mêmes numéros en cas de créations simultanées.
+    db.execute(text("SELECT pg_advisory_xact_lock(CAST(:service_id AS BIGINT))"), {"service_id": service.id})
     created_today = (
         db.query(func.count(models.Ticket.id))
         .filter(models.Ticket.service_id == service.id, models.Ticket.created_at >= start_of_local_day_utc())
@@ -266,7 +275,14 @@ def list_tickets(
 
 def call_next(db: Session, counter_id: int, actor_id: Optional[int] = None) -> models.Ticket:
     """RM-05 : appelle le plus ancien ticket WAITING du service du guichet."""
-    counter = db.get(models.Counter, counter_id)
+    # Verrouille le guichet avant le contrôle BUSY : deux requêtes simultanées
+    # ne peuvent pas affecter deux tickets au même guichet.
+    counter = (
+        db.query(models.Counter)
+        .filter(models.Counter.id == counter_id)
+        .with_for_update()
+        .first()
+    )
     if counter is None:
         raise ApiError(404, "COUNTER_NOT_FOUND", "Guichet introuvable.")
     if not counter.is_active:
@@ -330,8 +346,8 @@ def apply_action(
     if action == "reactivate":
         if ticket.reactivation_count >= 1:
             raise ApiError(409, "REACTIVATION_LIMIT_REACHED", "Ce ticket a déjà été réactivé une fois.")
-        if not is_open(ticket.service):
-            raise ApiError(409, "SERVICE_CLOSED", "Le service est fermé. Réactivation impossible.")
+        if not is_ticket_distribution_open(ticket.service):
+            raise ApiError(409, "SERVICE_CLOSED", "La distribution des tickets est terminée. Réactivation impossible.")
         ticket.queue_at = now_utc()  # replacé en fin de file
         ticket.reactivation_count += 1
         ticket.counter_id = None
@@ -374,18 +390,22 @@ def parse_hhmm(value: str) -> dtime:
     return datetime.strptime(value, "%H:%M").time()
 
 
-def _check_hours(opening: dtime, closing: dtime) -> None:
+def _check_hours(opening: dtime, closing: dtime, cutoff: Optional[dtime] = None) -> None:
     if opening >= closing:
         raise ApiError(422, "VALIDATION_ERROR", "L'heure d'ouverture doit être avant l'heure de fermeture.")
+    if cutoff is not None and not opening < cutoff <= closing:
+        raise ApiError(422, "VALIDATION_ERROR", "L'heure limite de distribution doit être après l'ouverture et au plus égale à la fermeture.")
 
 
 def create_service(db: Session, payload: schemas.ServiceCreate) -> models.Service:
     opening, closing = parse_hhmm(payload.opening_time), parse_hhmm(payload.closing_time)
-    _check_hours(opening, closing)
+    cutoff = parse_hhmm(payload.ticket_cutoff_time) if payload.ticket_cutoff_time else None
+    _check_hours(opening, closing, cutoff)
     service = models.Service(
         name=payload.name.strip(),
         opening_time=opening,
         closing_time=closing,
+        ticket_cutoff_time=cutoff,
         no_show_timeout_seconds=payload.no_show_timeout_seconds,
         is_active=True,
     )
@@ -401,9 +421,11 @@ def update_service(db: Session, service_id: int, data: dict) -> models.Service:
         raise ApiError(404, "SERVICE_NOT_FOUND", "Service introuvable.")
     opening = parse_hhmm(data["opening_time"]) if data.get("opening_time") else service.opening_time
     closing = parse_hhmm(data["closing_time"]) if data.get("closing_time") else service.closing_time
-    _check_hours(opening, closing)
+    cutoff = parse_hhmm(data["ticket_cutoff_time"]) if data.get("ticket_cutoff_time") else (None if "ticket_cutoff_time" in data else service.ticket_cutoff_time)
+    _check_hours(opening, closing, cutoff)
     service.opening_time = opening
     service.closing_time = closing
+    service.ticket_cutoff_time = cutoff
     if data.get("name") is not None:
         service.name = data["name"].strip()
     if data.get("no_show_timeout_seconds") is not None:

@@ -1,5 +1,6 @@
 """SamaFile - backend unique : services (horaires), tickets, guichets et appel du prochain ticket."""
 from contextlib import asynccontextmanager
+import os
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Query
@@ -12,19 +13,11 @@ from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import auth, logic, models, routes_admin, schemas, security
-from .database import Base, SessionLocal, engine, get_db, seed_demo_data
+from .database import SessionLocal, get_db, seed_demo_data
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Provisoire : création des tables au démarrage, en attendant les migrations Alembic de M4.
-    Base.metadata.create_all(bind=engine)
-    # Provisoire aussi : ajoute les colonnes apparues avec les comptes sur une base créée avant.
-    with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"))
-        conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reactivation_count INTEGER NOT NULL DEFAULT 0"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS counter_id INTEGER REFERENCES counters(id)"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"))
     with SessionLocal() as db:
         seed_demo_data(db)  # crée les services et guichets seulement si la base est vide
         auth.seed_admin(db)  # compte administrateur si ADMIN_EMAIL et ADMIN_PASSWORD sont définis
@@ -34,9 +27,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SamaFile - API", version="2.0.0", lifespan=lifespan)
 
+_cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

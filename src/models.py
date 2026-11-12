@@ -26,6 +26,7 @@ class Service(Base):
     name = Column(String(100), nullable=False)
     opening_time = Column(Time, nullable=False)
     closing_time = Column(Time, nullable=False)
+    ticket_cutoff_time = Column(Time, nullable=True)  # None = distribution until closing
     no_show_timeout_seconds = Column(Integer, nullable=False, default=120)
     is_active = Column(Boolean, nullable=False, default=True)
 

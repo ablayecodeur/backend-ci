@@ -30,40 +30,33 @@ backend-ci/
 
 ## Base de données : PostgreSQL
 
-L'adresse de la base est écrite dans `src/database.py` :
+La connexion PostgreSQL est fournie exclusivement par la variable `DATABASE_URL`. Copiez `.env.example` vers `.env`, puis adaptez l'hôte, le nom d'utilisateur et le mot de passe. Aucun identifiant de base réel ne doit être commité.
 
-```python
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://projetdevops:projet@postgres_server:5432/samafile",
-)
-```
+Les schémas sont gérés par **Alembic**. Le conteneur exécute `alembic upgrade head` avant de démarrer l'API. La migration initiale est conçue pour créer les tables sur une base neuve et compléter les colonnes manquantes sur une base existante.
 
-- Identifiant `projetdevops`, mot de passe `projet`, base `samafile`.
-- Hôte `postgres_server` = le conteneur PostgreSQL. Selon l'endroit où tourne le backend, changer l'hôte :
-  `localhost` (uvicorn sur la machine) ou `db` (Docker Compose du dépôt `deployment-cd`).
-  Ces trois adresses sont déjà dans `database.py` (deux sont en commentaire).
-- Au premier démarrage, le backend crée les tables et 4 services de démonstration (voir plus bas).
-
-Créer le compte et les bases une seule fois (pgAdmin, Query Tool, **une commande à la fois**) :
+Créer les bases PostgreSQL une seule fois (pgAdmin, Query Tool, une commande à la fois) :
 
 ```sql
-CREATE ROLE projetdevops LOGIN PASSWORD 'projet';
-CREATE DATABASE samafile OWNER projetdevops;
-CREATE DATABASE samafile_test OWNER projetdevops;
+CREATE ROLE samafile LOGIN PASSWORD 'CHANGE_ME';
+CREATE DATABASE samafile OWNER samafile;
+CREATE DATABASE samafile_test OWNER samafile;
 ```
 
 ## Lancer le backend dans Docker
 
-Le conteneur du backend doit être sur le même réseau Docker que `postgres_server` :
+Le backend doit être sur le même réseau Docker que PostgreSQL. Copiez et complétez le fichier d'environnement :
 
-```
+```bash
+cp .env.example .env
+# Modifier DATABASE_URL, SECRET_KEY, ADMIN_PASSWORD et CORS_ORIGINS
 docker network create samafile
 docker network connect samafile postgres_server
 
 docker build -t samafile/backend .
-docker run -d --name backend --network samafile -p 8000:8000 samafile/backend
+docker run -d --name backend --network samafile --env-file .env -p 8000:8000 samafile/backend
 ```
+
+Pour Docker Compose, adaptez l'hôte de `DATABASE_URL` au nom du service PostgreSQL (souvent `db`). En production, définir `APP_ENV=production`, une clé `SECRET_KEY` forte et les véritables origines frontend dans `CORS_ORIGINS`.
 
 Tester : http://localhost:8000/health doit répondre `{"status":"ok"}`, puis http://localhost:8000/docs.
 Les données restent dans le volume de PostgreSQL : ne jamais le supprimer (`docker compose down -v` interdit).
@@ -90,7 +83,7 @@ python -m pytest tests
 | URL | Une seule adresse pour toute l'API : `http://localhost:8000` (tickets, services et guichets). Tous les chemins commencent par `/api`. |
 | Format | JSON, noms de champs en `snake_case`, tous les chemins commencent par `/api` |
 | Dates | ISO 8601 en UTC avec `Z`, ex. `2026-11-09T10:00:00Z`. Le Sénégal est à UTC+0 : l'heure locale est identique. |
-| CORS | Ouvert à toutes les origines |
+| CORS | Origines autorisées configurées par `CORS_ORIGINS` |
 | Identifiants | Entiers (`id: 25`) |
 | Authentification | JWT : en-tête `Authorization: Bearer <jeton>` (voir « Comptes, rôles et sécurité ») |
 | Actualisation | Le frontend rafraîchit par polling (toutes les 5 secondes) : pas de WebSocket |
@@ -156,6 +149,7 @@ Le numéro d'un ticket est `lettre du service` + numéro du jour sur 3 chiffres 
   "name": "Dépôt",
   "opening_time": "08:00",
   "closing_time": "16:00",
+  "ticket_cutoff_time": null,
   "is_open": true,
   "ticket_distribution_open": true,
   "no_show_timeout_seconds": 120
@@ -371,8 +365,8 @@ Le frontend teste `error.code` et affiche `error.message`. `details` vaut `null`
 - FIFO : le plus ancien ticket `WAITING` du service est appelé en premier.
 - Position = 1 + nombre de tickets `WAITING` du même service passés avant lui.
 - Notification « rapprochez-vous » dès qu'il reste 10 personnes ou moins devant un ticket en attente.
-- Un ticket n'est créé qu'entre l'heure d'ouverture (incluse) et de fermeture (exclue), heure `Africa/Dakar`.
-- À la fermeture (ou le lendemain), les tickets `WAITING` et `CALLED` passent à `EXPIRED`.
+- Un ticket n'est créé qu'entre l'ouverture (incluse) et `ticket_cutoff_time` (exclue) si configurée, sinon jusqu'à la fermeture (exclue), heure `Africa/Dakar`.
+- À la fermeture (ou le lendemain), les tickets `WAITING`, `CALLED` et `IN_PROGRESS` passent à `EXPIRED`.
 - Absence : refusée tant que le délai du service n'est pas écoulé ; le ticket suivant est appelé automatiquement.
 - Réactivation : seulement depuis `NO_SHOW`, service ouvert, ticket replacé en fin de file.
 
@@ -483,7 +477,7 @@ Un agent appelle le suivant avec `POST /api/counters/{son_counter_id}/next`, pui
 `opening_time` doit précéder `closing_time` (sinon 422). Réponse : le même format que `GET /api/services/{id}`.
 
 ### PATCH /api/services/{id}
-Champs facultatifs : `name`, `opening_time`, `closing_time`, `no_show_timeout_seconds`, `is_active` (`false` retire le service de la liste publique).
+Champs facultatifs : `name`, `opening_time`, `closing_time`, `ticket_cutoff_time` (`HH:MM`, `null` pour supprimer), `no_show_timeout_seconds`, `is_active` (`false` retire le service de la liste publique).
 
 ### POST /api/counters (201), PATCH /api/counters/{id}
 `{"name": "Guichet 3", "service_id": 1}` ; `PATCH` : `name`, `is_active`.
@@ -519,8 +513,10 @@ Tableau de bord du jour (filtre facultatif `service_id`) :
 
 | Variable | Rôle |
 |---|---|
-| `DATABASE_URL` | Connexion PostgreSQL |
-| `SECRET_KEY` | Clé de signature des jetons. **À définir** en dehors du développement (sinon clé aléatoire à chaque démarrage : tout le monde est déconnecté au redémarrage). |
+| `DATABASE_URL` | Connexion PostgreSQL (obligatoire) |
+| `APP_ENV` | `production` en déploiement. |
+| `SECRET_KEY` | Clé de signature JWT ; obligatoire si `APP_ENV=production`. |
+| `CORS_ORIGINS` | Origines frontend autorisées, séparées par des virgules. |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | Créent le premier compte administrateur au démarrage s'il n'existe pas. |
 | `SEED_DEMO_ACCOUNTS=true` | Crée `agent1@samafile.sn` (guichet 1), `agent2@samafile.sn` (guichet 2) et `usager@samafile.sn`. |
 | `DEMO_PASSWORD` | Mot de passe des comptes de démonstration (défaut `Demo12345`). |
@@ -535,7 +531,7 @@ docker run -d --name backend_ci --network samafile -p 8000:8000 \
   samafile/backend
 ```
 
-Les tables `users` et les colonnes `tickets.user_id`, `users.counter_id`, `users.phone` sont créées ou ajoutées automatiquement au démarrage (provisoire, en attendant Alembic).
+Le schéma est versionné par Alembic et migré avant le démarrage de l'API.
 
 ## Affichage du guichet appelant (écran de l'usager)
 
