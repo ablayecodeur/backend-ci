@@ -30,40 +30,33 @@ backend-ci/
 
 ## Base de données : PostgreSQL
 
-L'adresse de la base est écrite dans `src/database.py` :
+La connexion PostgreSQL est fournie exclusivement par la variable `DATABASE_URL`. Copiez `.env.example` vers `.env`, puis adaptez l'hôte, le nom d'utilisateur et le mot de passe. Aucun identifiant de base réel ne doit être commité.
 
-```python
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://projetdevops:projet@postgres_server:5432/samafile",
-)
-```
+Les schémas sont gérés par **Alembic**. Le conteneur exécute `alembic upgrade head` avant de démarrer l'API. La migration initiale est conçue pour créer les tables sur une base neuve et compléter les colonnes manquantes sur une base existante.
 
-- Identifiant `projetdevops`, mot de passe `projet`, base `samafile`.
-- Hôte `postgres_server` = le conteneur PostgreSQL. Selon l'endroit où tourne le backend, changer l'hôte :
-  `localhost` (uvicorn sur la machine) ou `db` (Docker Compose du dépôt `deployment-cd`).
-  Ces trois adresses sont déjà dans `database.py` (deux sont en commentaire).
-- Au premier démarrage, le backend crée les tables et 4 services de démonstration (voir plus bas).
-
-Créer le compte et les bases une seule fois (pgAdmin, Query Tool, **une commande à la fois**) :
+Créer les bases PostgreSQL une seule fois (pgAdmin, Query Tool, une commande à la fois) :
 
 ```sql
-CREATE ROLE projetdevops LOGIN PASSWORD 'projet';
-CREATE DATABASE samafile OWNER projetdevops;
-CREATE DATABASE samafile_test OWNER projetdevops;
+CREATE ROLE samafile LOGIN PASSWORD 'CHANGE_ME';
+CREATE DATABASE samafile OWNER samafile;
+CREATE DATABASE samafile_test OWNER samafile;
 ```
 
 ## Lancer le backend dans Docker
 
-Le conteneur du backend doit être sur le même réseau Docker que `postgres_server` :
+Le backend doit être sur le même réseau Docker que PostgreSQL. Copiez et complétez le fichier d'environnement :
 
-```
+```bash
+cp .env.example .env
+# Modifier DATABASE_URL, SECRET_KEY, ADMIN_PASSWORD et CORS_ORIGINS
 docker network create samafile
 docker network connect samafile postgres_server
 
 docker build -t samafile/backend .
-docker run -d --name backend --network samafile -p 8000:8000 samafile/backend
+docker run -d --name backend --network samafile --env-file .env -p 8000:8000 samafile/backend
 ```
+
+Pour Docker Compose, adaptez l'hôte de `DATABASE_URL` au nom du service PostgreSQL (souvent `db`). En production, définir `APP_ENV=production`, une clé `SECRET_KEY` forte et les véritables origines frontend dans `CORS_ORIGINS`.
 
 Tester : http://localhost:8000/health doit répondre `{"status":"ok"}`, puis http://localhost:8000/docs.
 Les données restent dans le volume de PostgreSQL : ne jamais le supprimer (`docker compose down -v` interdit).
@@ -538,7 +531,7 @@ docker run -d --name backend_ci --network samafile -p 8000:8000 \
   samafile/backend
 ```
 
-Les tables `users` et les colonnes `tickets.user_id`, `users.counter_id`, `users.phone` sont créées ou ajoutées automatiquement au démarrage (provisoire, en attendant Alembic).
+Le schéma est versionné par Alembic et migré avant le démarrage de l'API.
 
 ## Affichage du guichet appelant (écran de l'usager)
 
