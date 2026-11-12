@@ -264,7 +264,7 @@ def list_tickets(
     return schemas.TicketList(items=[schemas.TicketItem.model_validate(t) for t in rows], total=total)
 
 
-def call_next(db: Session, counter_id: int) -> models.Ticket:
+def call_next(db: Session, counter_id: int, actor_id: Optional[int] = None) -> models.Ticket:
     """RM-05 : appelle le plus ancien ticket WAITING du service du guichet."""
     counter = db.get(models.Counter, counter_id)
     if counter is None:
@@ -293,7 +293,7 @@ def call_next(db: Session, counter_id: int) -> models.Ticket:
 
     previous = ticket.status
     ticket.status = CALLED
-    record_status_change(db, ticket, previous, CALLED)
+    record_status_change(db, ticket, previous, CALLED, actor_id)
     ticket.counter_id = counter.id
     ticket.called_at = now_utc()
     db.commit()
@@ -302,7 +302,7 @@ def call_next(db: Session, counter_id: int) -> models.Ticket:
 
 
 def apply_action(
-    db: Session, ticket_id: int, action: str
+    db: Session, ticket_id: int, action: str, actor_id: Optional[int] = None
 ) -> Tuple[models.Ticket, Optional[models.Ticket]]:
     """Applique start / complete / no_show / cancel / reactivate.
     Renvoie (ticket, ticket_appelé_automatiquement) ; le second n'existe que pour no_show (RM-08)."""
@@ -340,14 +340,14 @@ def apply_action(
     counter_id = ticket.counter_id
     previous = ticket.status
     ticket.status = target
-    record_status_change(db, ticket, previous, target)
+    record_status_change(db, ticket, previous, target, actor_id)
     db.commit()
     db.refresh(ticket)
 
     next_ticket = None
     if action == "no_show" and counter_id:
         try:
-            next_ticket = call_next(db, counter_id)
+            next_ticket = call_next(db, counter_id, actor_id=actor_id)
         except ApiError:
             next_ticket = None  # file vide ou guichet inactif : rien à appeler
     return ticket, next_ticket
