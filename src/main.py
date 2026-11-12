@@ -13,20 +13,11 @@ from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import auth, logic, models, routes_admin, schemas, security
-from .database import Base, SessionLocal, engine, get_db, seed_demo_data
+from .database import SessionLocal, get_db, seed_demo_data
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Provisoire : création des tables au démarrage, en attendant les migrations Alembic de M4.
-    Base.metadata.create_all(bind=engine)
-    # Provisoire aussi : ajoute les colonnes apparues avec les comptes sur une base créée avant.
-    with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"))
-        conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reactivation_count INTEGER NOT NULL DEFAULT 0"))
-        conn.execute(text("ALTER TABLE services ADD COLUMN IF NOT EXISTS ticket_cutoff_time TIME NULL"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS counter_id INTEGER REFERENCES counters(id)"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"))
     with SessionLocal() as db:
         seed_demo_data(db)  # crée les services et guichets seulement si la base est vide
         auth.seed_admin(db)  # compte administrateur si ADMIN_EMAIL et ADMIN_PASSWORD sont définis
