@@ -23,6 +23,7 @@ async def lifespan(app: FastAPI):
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"))
         conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reactivation_count INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text("ALTER TABLE services ADD COLUMN IF NOT EXISTS ticket_cutoff_time TIME NULL"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS counter_id INTEGER REFERENCES counters(id)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"))
     with SessionLocal() as db:
