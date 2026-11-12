@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from src import logic
@@ -303,3 +304,34 @@ def test_in_progress_ticket_expires_at_service_closing(client, clock):
     response = client.get(f"/api/tickets/{ticket['id']}")
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "EXPIRED"
+
+
+def test_concurrent_ticket_creation_keeps_ticket_numbers_unique():
+    def create_one(index):
+        with SessionLocal() as db:
+            ticket = logic.create_ticket(db, 1, f"Usager {index}")
+            return ticket.ticket_number
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        numbers = list(pool.map(create_one, range(8)))
+
+    assert len(numbers) == len(set(numbers))
+    assert set(numbers) == {f"A{i:03d}" for i in range(1, 9)}
+
+
+def test_concurrent_calls_on_same_counter_never_assign_two_active_tickets(client):
+    new_ticket(client, "Usager 1")
+    new_ticket(client, "Usager 2")
+
+    def call_once():
+        with SessionLocal() as db:
+            try:
+                return logic.call_next(db, 1).id
+            except logic.ApiError as error:
+                return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: call_once(), range(2)))
+
+    assert sum(isinstance(result, int) for result in results) == 1
+    assert "COUNTER_BUSY" in results
