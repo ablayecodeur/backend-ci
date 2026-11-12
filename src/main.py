@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI):
     # Provisoire aussi : ajoute les colonnes apparues avec les comptes sur une base créée avant.
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"))
+        conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reactivation_count INTEGER NOT NULL DEFAULT 0"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS counter_id INTEGER REFERENCES counters(id)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"))
     with SessionLocal() as db:
