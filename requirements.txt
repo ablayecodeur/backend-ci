@@ -4,3 +4,4 @@ SQLAlchemy==2.1.8
 psycopg[binary]==3.3.8
 tzdata==2026.6
 PyJWT==2.10.1
+alembic>=1.14,<2
