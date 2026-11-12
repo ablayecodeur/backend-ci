@@ -35,9 +35,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SamaFile - API", version="2.0.0", lifespan=lifespan)
 
+_cors_origins = [origin.strip() for origin in __import__("os").getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
