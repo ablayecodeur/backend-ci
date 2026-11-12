@@ -227,7 +227,7 @@ def create_ticket(
         raise ApiError(409, "SERVICE_CLOSED", message)
 
     # Sérialise la numérotation par service : évite deux mêmes numéros en cas de créations simultanées.
-    db.execute(text("SELECT pg_advisory_xact_lock(:service_id)"), {"service_id": service.id})
+    db.execute(text("SELECT pg_advisory_xact_lock(CAST(:service_id AS BIGINT))"), {"service_id": service.id})
     created_today = (
         db.query(func.count(models.Ticket.id))
         .filter(models.Ticket.service_id == service.id, models.Ticket.created_at >= start_of_local_day_utc())
