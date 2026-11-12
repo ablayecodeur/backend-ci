@@ -4,7 +4,7 @@ from datetime import datetime, time as dtime, timezone
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -226,6 +226,8 @@ def create_ticket(
             message = f"La distribution des tickets est terminée depuis {cutoff:%H:%M}."
         raise ApiError(409, "SERVICE_CLOSED", message)
 
+    # Sérialise la numérotation par service : évite deux mêmes numéros en cas de créations simultanées.
+    db.execute(text("SELECT pg_advisory_xact_lock(:service_id)"), {"service_id": service.id})
     created_today = (
         db.query(func.count(models.Ticket.id))
         .filter(models.Ticket.service_id == service.id, models.Ticket.created_at >= start_of_local_day_utc())
@@ -273,7 +275,14 @@ def list_tickets(
 
 def call_next(db: Session, counter_id: int, actor_id: Optional[int] = None) -> models.Ticket:
     """RM-05 : appelle le plus ancien ticket WAITING du service du guichet."""
-    counter = db.get(models.Counter, counter_id)
+    # Verrouille le guichet avant le contrôle BUSY : deux requêtes simultanées
+    # ne peuvent pas affecter deux tickets au même guichet.
+    counter = (
+        db.query(models.Counter)
+        .filter(models.Counter.id == counter_id)
+        .with_for_update()
+        .first()
+    )
     if counter is None:
         raise ApiError(404, "COUNTER_NOT_FOUND", "Guichet introuvable.")
     if not counter.is_active:
