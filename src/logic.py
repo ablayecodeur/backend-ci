@@ -97,6 +97,17 @@ def service_out(service: models.Service) -> schemas.ServiceOut:
     )
 
 
+def record_status_change(db: Session, ticket: models.Ticket, previous: Optional[str], new: str, actor_id: Optional[int] = None) -> None:
+    """Enregistre chaque transition de statut dans l'historique."""
+    db.add(models.TicketStatusHistory(
+        ticket_id=ticket.id,
+        previous_status=previous,
+        new_status=new,
+        changed_at=now_utc(),
+        actor_id=actor_id,
+    ))
+
+
 def expire_if_needed(db: Session, service: models.Service) -> None:
     """RM-04 : à la fermeture (ou le lendemain), les tickets WAITING/CALLED passent à EXPIRED."""
     closed = now_local().time() >= service.closing_time
@@ -109,7 +120,9 @@ def expire_if_needed(db: Session, service: models.Service) -> None:
     changed = False
     for ticket in tickets:
         if closed or _local_date(ticket.created_at) < today:
+            previous = ticket.status
             ticket.status = EXPIRED
+            record_status_change(db, ticket, previous, EXPIRED)
             changed = True
     if changed:
         db.commit()
@@ -223,6 +236,8 @@ def create_ticket(
         queue_at=now,
     )
     db.add(ticket)
+    db.flush()
+    record_status_change(db, ticket, None, WAITING, actor_id=user_id)
     db.commit()
     db.refresh(ticket)
     return ticket
@@ -249,7 +264,7 @@ def list_tickets(
     return schemas.TicketList(items=[schemas.TicketItem.model_validate(t) for t in rows], total=total)
 
 
-def call_next(db: Session, counter_id: int) -> models.Ticket:
+def call_next(db: Session, counter_id: int, actor_id: Optional[int] = None) -> models.Ticket:
     """RM-05 : appelle le plus ancien ticket WAITING du service du guichet."""
     counter = db.get(models.Counter, counter_id)
     if counter is None:
@@ -276,7 +291,9 @@ def call_next(db: Session, counter_id: int) -> models.Ticket:
     if ticket is None:
         raise ApiError(409, "QUEUE_EMPTY", "Aucun ticket en attente.")
 
+    previous = ticket.status
     ticket.status = CALLED
+    record_status_change(db, ticket, previous, CALLED, actor_id)
     ticket.counter_id = counter.id
     ticket.called_at = now_utc()
     db.commit()
@@ -285,7 +302,7 @@ def call_next(db: Session, counter_id: int) -> models.Ticket:
 
 
 def apply_action(
-    db: Session, ticket_id: int, action: str
+    db: Session, ticket_id: int, action: str, actor_id: Optional[int] = None
 ) -> Tuple[models.Ticket, Optional[models.Ticket]]:
     """Applique start / complete / no_show / cancel / reactivate.
     Renvoie (ticket, ticket_appelé_automatiquement) ; le second n'existe que pour no_show (RM-08)."""
@@ -311,21 +328,26 @@ def apply_action(
             )
 
     if action == "reactivate":
+        if ticket.reactivation_count >= 1:
+            raise ApiError(409, "REACTIVATION_LIMIT_REACHED", "Ce ticket a déjà été réactivé une fois.")
         if not is_open(ticket.service):
             raise ApiError(409, "SERVICE_CLOSED", "Le service est fermé. Réactivation impossible.")
         ticket.queue_at = now_utc()  # replacé en fin de file
+        ticket.reactivation_count += 1
         ticket.counter_id = None
         ticket.called_at = None
 
     counter_id = ticket.counter_id
+    previous = ticket.status
     ticket.status = target
+    record_status_change(db, ticket, previous, target, actor_id)
     db.commit()
     db.refresh(ticket)
 
     next_ticket = None
     if action == "no_show" and counter_id:
         try:
-            next_ticket = call_next(db, counter_id)
+            next_ticket = call_next(db, counter_id, actor_id=actor_id)
         except ApiError:
             next_ticket = None  # file vide ou guichet inactif : rien à appeler
     return ticket, next_ticket

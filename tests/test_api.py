@@ -241,3 +241,27 @@ def test_no_notification_once_the_ticket_is_called(client):
     call_next(1)
     body = client.get(f"/api/tickets/{ticket['id']}").json()
     assert body["people_ahead"] is None and body["notification"] is None
+
+
+
+def test_reactivation_is_limited_to_once(client, clock):
+    first = new_ticket(client)
+    second = new_ticket(client)
+
+    call_next(1)
+    clock["now"] += timedelta(seconds=121)
+    client.patch(f"/api/tickets/{first['id']}/no-show")
+
+    # Le second ticket est appelé automatiquement : on le termine pour libérer le guichet.
+    client.patch(f"/api/tickets/{second['id']}/start")
+    client.patch(f"/api/tickets/{second['id']}/complete")
+
+    # Le premier ticket revient en fin de file, puis peut être appelé une seconde fois.
+    client.post(f"/api/tickets/{first['id']}/reactivate")
+    call_next(1)
+    clock["now"] += timedelta(seconds=121)
+    client.patch(f"/api/tickets/{first['id']}/no-show")
+
+    refused = client.post(f"/api/tickets/{first['id']}/reactivate")
+    assert refused.status_code == 409
+    assert error_code(refused) == "REACTIVATION_LIMIT_REACHED"

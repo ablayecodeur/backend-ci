@@ -22,6 +22,7 @@ async def lifespan(app: FastAPI):
     # Provisoire aussi : ajoute les colonnes apparues avec les comptes sur une base créée avant.
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)"))
+        conn.execute(text("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reactivation_count INTEGER NOT NULL DEFAULT 0"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS counter_id INTEGER REFERENCES counters(id)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(30)"))
     with SessionLocal() as db:
@@ -275,28 +276,28 @@ def get_position(ticket_id: int, db: Session = Depends(get_db), user: models.Use
 @app.patch("/api/tickets/{ticket_id}/start", response_model=schemas.TicketOut)
 def start_ticket(ticket_id: int, db: Session = Depends(get_db), user: models.User = Depends(auth.require_staff)):
     auth.ensure_ticket_handler(db, ticket_id, user)
-    ticket, _ = logic.apply_action(db, ticket_id, "start")
+    ticket, _ = logic.apply_action(db, ticket_id, "start", actor_id=user.id)
     return logic.ticket_out(db, ticket)
 
 
 @app.patch("/api/tickets/{ticket_id}/complete", response_model=schemas.TicketOut)
 def complete_ticket(ticket_id: int, db: Session = Depends(get_db), user: models.User = Depends(auth.require_staff)):
     auth.ensure_ticket_handler(db, ticket_id, user)
-    ticket, _ = logic.apply_action(db, ticket_id, "complete")
+    ticket, _ = logic.apply_action(db, ticket_id, "complete", actor_id=user.id)
     return logic.ticket_out(db, ticket)
 
 
 @app.patch("/api/tickets/{ticket_id}/cancel", response_model=schemas.TicketOut)
 def cancel_ticket(ticket_id: int, db: Session = Depends(get_db), user: models.User = Depends(auth.get_current_user)):
     auth.ensure_ticket_access(db, ticket_id, user)  # propriétaire, ou personnel du service
-    ticket, _ = logic.apply_action(db, ticket_id, "cancel")
+    ticket, _ = logic.apply_action(db, ticket_id, "cancel", actor_id=user.id)
     return logic.ticket_out(db, ticket)
 
 
 @app.patch("/api/tickets/{ticket_id}/no-show", response_model=schemas.NoShowOut)
 def no_show_ticket(ticket_id: int, db: Session = Depends(get_db), user: models.User = Depends(auth.require_staff)):
     auth.ensure_ticket_handler(db, ticket_id, user)
-    ticket, next_ticket = logic.apply_action(db, ticket_id, "no_show")
+    ticket, next_ticket = logic.apply_action(db, ticket_id, "no_show", actor_id=user.id)
     return schemas.NoShowOut(
         **dict(logic.ticket_out(db, ticket)),
         next_ticket=logic.ticket_out(db, next_ticket) if next_ticket else None,
@@ -307,7 +308,7 @@ def no_show_ticket(ticket_id: int, db: Session = Depends(get_db), user: models.U
 def reactivate_ticket(ticket_id: int, db: Session = Depends(get_db), user: models.User = Depends(auth.require_staff)):
     ticket = logic.get_ticket(db, ticket_id)
     auth.ensure_service_scope(db, user, ticket.service_id)
-    ticket, _ = logic.apply_action(db, ticket_id, "reactivate")
+    ticket, _ = logic.apply_action(db, ticket_id, "reactivate", actor_id=user.id)
     return logic.ticket_out(db, ticket)
 
 
@@ -341,7 +342,7 @@ def counter_queue(
 @app.post("/api/counters/{counter_id}/next", response_model=schemas.TicketOut)
 def call_next_ticket(counter_id: int, db: Session = Depends(get_db), user: models.User = Depends(auth.require_staff)):
     auth.ensure_own_counter(db, user, counter_id)
-    ticket = logic.call_next(db, counter_id)
+    ticket = logic.call_next(db, counter_id, actor_id=user.id)
     return logic.ticket_out(db, ticket)
 
 

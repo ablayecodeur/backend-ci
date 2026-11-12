@@ -55,5 +55,19 @@ class Ticket(Base):
     created_at = Column(DateTime, nullable=False)  # UTC
     queue_at = Column(DateTime, nullable=False)    # UTC, ordre FIFO (change à la réactivation)
     called_at = Column(DateTime, nullable=True)    # UTC
+    reactivation_count = Column(Integer, nullable=False, default=0)
 
     service = relationship("Service")
+
+
+class TicketStatusHistory(Base):
+    __tablename__ = "ticket_status_history"
+
+    id = Column(Integer, primary_key=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False, index=True)
+    previous_status = Column(String(20), nullable=True)
+    new_status = Column(String(20), nullable=False)
+    changed_at = Column(DateTime, nullable=False)  # UTC
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    ticket = relationship("Ticket")
