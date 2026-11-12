@@ -265,3 +265,41 @@ def test_reactivation_is_limited_to_once(client, clock):
     refused = client.post(f"/api/tickets/{first['id']}/reactivate")
     assert refused.status_code == 409
     assert error_code(refused) == "REACTIVATION_LIMIT_REACHED"
+
+
+def test_ticket_distribution_cutoff_is_separate_from_service_closing(client, clock):
+    created = client.post("/api/services", json={
+        "name": "État civil",
+        "opening_time": "08:00",
+        "closing_time": "16:00",
+        "ticket_cutoff_time": "11:30",
+    })
+    assert created.status_code == 201, created.text
+    service = created.json()
+    assert service["is_open"] is True
+    assert service["ticket_distribution_open"] is True
+    assert service["ticket_cutoff_time"] == "11:30"
+
+    clock["now"] = clock["now"].replace(hour=12, minute=0)
+    service_view = client.get(f"/api/services/{service['id']}").json()
+    assert service_view["is_open"] is True
+    assert service_view["ticket_distribution_open"] is False
+
+    refused = client.post("/api/tickets", json={
+        "service_id": service["id"],
+        "user_name": "Awa",
+    })
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "SERVICE_CLOSED"
+
+
+def test_in_progress_ticket_expires_at_service_closing(client, clock):
+    ticket = new_ticket(client)
+    call_next(1)
+    started = client.patch(f"/api/tickets/{ticket['id']}/start")
+    assert started.status_code == 200, started.text
+
+    clock["now"] = clock["now"].replace(hour=16, minute=0)
+    response = client.get(f"/api/tickets/{ticket['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "EXPIRED"
