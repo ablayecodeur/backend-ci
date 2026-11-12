@@ -337,8 +337,8 @@ def apply_action(
     if action == "reactivate":
         if ticket.reactivation_count >= 1:
             raise ApiError(409, "REACTIVATION_LIMIT_REACHED", "Ce ticket a déjà été réactivé une fois.")
-        if not is_open(ticket.service):
-            raise ApiError(409, "SERVICE_CLOSED", "Le service est fermé. Réactivation impossible.")
+        if not is_ticket_distribution_open(ticket.service):
+            raise ApiError(409, "SERVICE_CLOSED", "La distribution des tickets est terminée. Réactivation impossible.")
         ticket.queue_at = now_utc()  # replacé en fin de file
         ticket.reactivation_count += 1
         ticket.counter_id = None
