@@ -76,6 +76,7 @@ class ServiceOut(BaseModel):
     opening_time: str
     closing_time: str
     ticket_cutoff_time: Optional[str] = None
+    ticket_cutoff_minutes_before_closing: int = 30
     is_open: bool
     ticket_distribution_open: bool
     no_show_timeout_seconds: int
@@ -172,6 +173,7 @@ class ServiceCreate(BaseModel):
     opening_time: str = Field(pattern=HHMM_PATTERN)
     closing_time: str = Field(pattern=HHMM_PATTERN)
     ticket_cutoff_time: Optional[str] = Field(default=None, pattern=HHMM_PATTERN)
+    ticket_cutoff_minutes_before_closing: int = Field(default=30, ge=0, le=1440)
     no_show_timeout_seconds: int = Field(default=120, ge=10, le=3600)
 
 
@@ -180,6 +182,7 @@ class ServiceUpdate(BaseModel):
     opening_time: Optional[str] = Field(default=None, pattern=HHMM_PATTERN)
     closing_time: Optional[str] = Field(default=None, pattern=HHMM_PATTERN)
     ticket_cutoff_time: Optional[str] = Field(default=None, pattern=HHMM_PATTERN)
+    ticket_cutoff_minutes_before_closing: int = Field(default=30, ge=0, le=1440)
     no_show_timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3600)
     is_active: Optional[bool] = None
 

@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
-from src import logic
+import pytest
+
+from src import logic, models
 from src.database import SessionLocal
 
 from conftest import TZ
@@ -180,6 +182,8 @@ def test_services_endpoint(client, clock):
         "name": "Retrait",
         "opening_time": "08:00",
         "closing_time": "16:00",
+        "ticket_cutoff_time": "15:30",
+        "ticket_cutoff_minutes_before_closing": 30,
         "is_open": True,
         "ticket_distribution_open": True,
         "no_show_timeout_seconds": 120,
@@ -294,6 +298,79 @@ def test_ticket_distribution_cutoff_is_separate_from_service_closing(client, clo
     assert refused.json()["error"]["code"] == "SERVICE_CLOSED"
 
 
+def test_default_ticket_cutoff_is_30_minutes_before_closing(client, clock):
+    created = client.post("/api/services", json={
+        "name": "Accueil",
+        "opening_time": "10:00",
+        "closing_time": "12:00",
+    })
+    assert created.status_code == 201, created.text
+    service_id = created.json()["id"]
+    assert created.json()["ticket_cutoff_time"] == "11:30"
+    assert created.json()["ticket_cutoff_minutes_before_closing"] == 30
+
+    clock["now"] = clock["now"].replace(hour=11, minute=29)
+    assert client.get(f"/api/services/{service_id}").json()["ticket_distribution_open"] is True
+    clock["now"] = clock["now"].replace(minute=30)
+    assert client.get(f"/api/services/{service_id}").json()["ticket_distribution_open"] is False
+    refused = client.post("/api/tickets", json={"service_id": service_id})
+    assert refused.status_code == 409
+
+
+def test_ticket_cutoff_margin_is_configurable_per_service(client, clock):
+    created = client.post("/api/services", json={
+        "name": "Rendez-vous",
+        "opening_time": "10:00",
+        "closing_time": "12:00",
+        "ticket_cutoff_minutes_before_closing": 5,
+    })
+    assert created.status_code == 201, created.text
+    service_id = created.json()["id"]
+    assert created.json()["ticket_cutoff_time"] == "11:55"
+
+    clock["now"] = clock["now"].replace(hour=11, minute=54)
+    assert client.get(f"/api/services/{service_id}").json()["ticket_distribution_open"] is True
+    clock["now"] = clock["now"].replace(minute=55)
+    assert client.get(f"/api/services/{service_id}").json()["ticket_distribution_open"] is False
+
+    updated = client.patch(
+        f"/api/services/{service_id}",
+        json={"ticket_cutoff_minutes_before_closing": 10},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["ticket_cutoff_time"] == "11:50"
+
+
+def test_zero_cutoff_margin_allows_ticket_until_closing(client, clock):
+    created = client.post("/api/services", json={
+        "name": "Jusqu'à fermeture",
+        "opening_time": "10:00",
+        "closing_time": "12:00",
+        "ticket_cutoff_minutes_before_closing": 0,
+    })
+    assert created.status_code == 201, created.text
+    service_id = created.json()["id"]
+    assert created.json()["ticket_cutoff_time"] == "12:00"
+
+    clock["now"] = clock["now"].replace(hour=11, minute=59)
+    assert client.get(f"/api/services/{service_id}").json()["ticket_distribution_open"] is True
+    clock["now"] = clock["now"].replace(hour=12, minute=0)
+    assert client.get(f"/api/services/{service_id}").json()["ticket_distribution_open"] is False
+
+
+def test_default_cutoff_disables_ticketing_for_short_service_window(client, clock):
+    created = client.post("/api/services", json={
+        "name": "Service court",
+        "opening_time": "10:00",
+        "closing_time": "10:08",
+    })
+    assert created.status_code == 201, created.text
+    service = created.json()
+    assert service["ticket_cutoff_time"] == "10:00"
+    assert service["ticket_distribution_open"] is False
+    assert client.post("/api/tickets", json={"service_id": service["id"]}).status_code == 409
+
+
 def test_in_progress_ticket_expires_at_service_closing(client, clock):
     ticket = new_ticket(client)
     call_next(1)
@@ -335,3 +412,55 @@ def test_concurrent_calls_on_same_counter_never_assign_two_active_tickets(client
 
     assert sum(isinstance(result, int) for result in results) == 1
     assert "COUNTER_BUSY" in results
+
+
+def test_concurrent_no_show_transition_is_recorded_once(clock):
+    with SessionLocal() as db:
+        ticket_id = logic.create_ticket(db, 1, "Usager").id
+    call_next(1)
+    clock["now"] += timedelta(seconds=121)
+
+    def mark_no_show():
+        with SessionLocal() as db:
+            try:
+                logic.apply_action(db, ticket_id, "no_show")
+                return "NO_SHOW"
+            except logic.ApiError as error:
+                return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: mark_no_show(), range(2)))
+
+    assert sorted(results) == ["INVALID_TRANSITION", "NO_SHOW"]
+    with SessionLocal() as db:
+        history_count = (
+            db.query(models.TicketStatusHistory)
+            .filter(
+                models.TicketStatusHistory.ticket_id == ticket_id,
+                models.TicketStatusHistory.new_status == logic.NO_SHOW,
+            )
+            .count()
+        )
+    assert history_count == 1
+
+
+def test_ticket_creation_rechecks_cutoff_after_numbering_lock(monkeypatch, clock):
+    clock["now"] = datetime(2026, 11, 9, 11, 29, 59, tzinfo=TZ)
+    with SessionLocal() as db:
+        service = db.get(models.Service, 1)
+        service.ticket_cutoff_time = time(11, 30)
+        db.commit()
+
+        original_execute = db.execute
+
+        def execute_and_advance_clock(statement, params=None, **kwargs):
+            result = original_execute(statement, params, **kwargs)
+            if "pg_advisory_xact_lock" in str(statement):
+                clock["now"] = datetime(2026, 11, 9, 11, 30, tzinfo=TZ)
+            return result
+
+        monkeypatch.setattr(db, "execute", execute_and_advance_clock)
+        with pytest.raises(logic.ApiError) as exc_info:
+            logic.create_ticket(db, 1, "Trop tard")
+
+    assert exc_info.value.code == "SERVICE_CLOSED"

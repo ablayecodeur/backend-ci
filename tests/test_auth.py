@@ -1,3 +1,6 @@
+import pytest
+
+from src import auth
 from conftest import make_user_client
 
 
@@ -136,3 +139,10 @@ def test_admin_can_call_next_for_a_users_ticket(client):
     # l'usager voit le changement de statut sur son propre ticket
     assert user.get(f"/api/tickets/{ticket_id}").json()["status"] == "CALLED"
     assert client.get(f"/api/tickets/{ticket_id}").status_code == 200  # l'admin accède à tous les tickets
+
+
+def test_demo_accounts_are_rejected_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SEED_DEMO_ACCOUNTS", "true")
+    with pytest.raises(RuntimeError, match="interdit"):
+        auth.seed_demo_accounts(None)
