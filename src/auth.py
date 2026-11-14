@@ -123,8 +123,10 @@ def seed_demo_accounts(db: Session) -> None:
 
     Mot de passe : DEMO_PASSWORD (par défaut Demo12345). À réserver au développement et aux démonstrations.
     """
-    if (os.getenv("SEED_DEMO_ACCOUNTS") or "").lower() not in ("1", "true", "yes"):
+    if (os.getenv("SEED_DEMO_ACCOUNTS") or "").strip().lower() not in ("1", "true", "yes"):
         return
+    if (os.getenv("APP_ENV") or "development").strip().lower() in {"prod", "production"}:
+        raise RuntimeError("SEED_DEMO_ACCOUNTS est interdit avec APP_ENV=production.")
     password = os.getenv("DEMO_PASSWORD", "Demo12345")
     counters = db.query(models.Counter).order_by(models.Counter.id).limit(2).all()
     demo = [

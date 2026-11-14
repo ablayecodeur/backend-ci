@@ -26,7 +26,8 @@ class Service(Base):
     name = Column(String(100), nullable=False)
     opening_time = Column(Time, nullable=False)
     closing_time = Column(Time, nullable=False)
-    ticket_cutoff_time = Column(Time, nullable=True)  # None = distribution until closing
+    ticket_cutoff_time = Column(Time, nullable=True)  # override historique, si défini
+    ticket_cutoff_minutes_before_closing = Column(Integer, nullable=False, default=30, server_default="30")
     no_show_timeout_seconds = Column(Integer, nullable=False, default=120)
     is_active = Column(Boolean, nullable=False, default=True)
 
@@ -36,7 +37,7 @@ class Counter(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
-    service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
+    service_id = Column(Integer, ForeignKey("services.id"), nullable=False, index=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
     service = relationship("Service")
@@ -49,8 +50,8 @@ class Ticket(Base):
     id = Column(Integer, primary_key=True)
     ticket_number = Column(String(10), nullable=False)
     service_id = Column(Integer, ForeignKey("services.id"), nullable=False)
-    counter_id = Column(Integer, ForeignKey("counters.id"), nullable=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # compte usager propriétaire (facultatif)
+    counter_id = Column(Integer, ForeignKey("counters.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # compte propriétaire (facultatif)
     user_name = Column(String(100), nullable=True)
     status = Column(String(20), nullable=False, default="WAITING")
     created_at = Column(DateTime, nullable=False)  # UTC
