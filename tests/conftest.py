@@ -2,21 +2,40 @@ import os
 import pathlib
 import sys
 from datetime import datetime, time
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-# Base de test PostgreSQL dédiée (les tests vident les tables, ne jamais viser la vraie base).
-# Par défaut : le conteneur postgres_server publié sur localhost:5432.
-_url = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql://projetdevops:projet@localhost:5432/samafile_test",
-)
-from sqlalchemy.engine import make_url  # noqa: E402
+_test_url = os.getenv("TEST_DATABASE_URL")
+if not _test_url:
+    raise RuntimeError("Définissez TEST_DATABASE_URL vers une base PostgreSQL dédiée aux tests.")
 
-assert "test" in (make_url(_url).database or ""), "la base de test doit contenir 'test' dans son nom"
-os.environ["DATABASE_URL"] = _url
+_parsed_test_url = make_url(_test_url)
+_database_name = (_parsed_test_url.database or "").lower()
+if os.getenv("APP_ENV", "development").strip().lower() in {"prod", "production"}:
+    raise RuntimeError("Les tests sont interdits avec APP_ENV=production.")
+if not _database_name.endswith("_test"):
+    raise RuntimeError("La base de test doit avoir un nom se terminant par '_test'.")
+if _parsed_test_url.host not in {"localhost", "127.0.0.1", "::1"} and os.getenv("TEST_DATABASE_ALLOW_REMOTE") != "1":
+    raise RuntimeError(
+        "La base de test distante doit être explicitement autorisée avec TEST_DATABASE_ALLOW_REMOTE=1."
+    )
+
+# Toutes les tables de la suite vivent dans un schéma éphémère dédié. Les tests
+# n'effacent et ne recréent jamais les tables du schéma public ni d'autres schémas.
+_test_schema = f"samafile_pytest_{uuid4().hex}"
+_schema_admin_engine = create_engine(_parsed_test_url)
+with _schema_admin_engine.begin() as connection:
+    connection.execute(text(f'CREATE SCHEMA "{_test_schema}"'))
+
+_isolated_test_url = _parsed_test_url.set(
+    query={**dict(_parsed_test_url.query), "options": f"-c search_path={_test_schema}"}
+)
+os.environ["DATABASE_URL"] = _isolated_test_url.render_as_string(hide_password=False)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -37,6 +56,12 @@ def clock(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def database(clock):
+    with engine.connect() as connection:
+        current_schema = connection.scalar(text("SELECT current_schema()"))
+    if current_schema != _test_schema:
+        raise RuntimeError(
+            f"Isolation PostgreSQL invalide : schéma courant {current_schema!r}, attendu {_test_schema!r}."
+        )
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
@@ -58,6 +83,15 @@ def database(clock):
         )
         db.commit()
     yield
+
+
+def pytest_sessionfinish(session, exitstatus):
+    try:
+        with _schema_admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{_test_schema}" CASCADE'))
+    finally:
+        engine.dispose()
+        _schema_admin_engine.dispose()
 
 
 def login_client(email, password):

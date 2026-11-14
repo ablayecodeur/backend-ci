@@ -63,9 +63,17 @@ Les données restent dans le volume de PostgreSQL : ne jamais le supprimer (`doc
 
 ## Tests
 
-Les tests vident les tables : ils utilisent la base dédiée `samafile_test` (le nom doit contenir `test`),
-par défaut `postgresql://projetdevops:projet@localhost:5432/samafile_test`
-(le port 5432 de `postgres_server` doit être publié). Autre base : variable `TEST_DATABASE_URL`.
+Les tests exigent une base PostgreSQL dédiée dont le nom se termine par `_test` via `TEST_DATABASE_URL`.
+Ils créent un schéma temporaire par exécution ; ils ne suppriment pas les tables du schéma `public`.
+Pour le réseau local Docker, utilisez par exemple :
+
+```bash
+export APP_ENV=test
+export TEST_DATABASE_URL='postgresql+psycopg://samafile:CHANGE_ME@localhost:5432/samafile_test'
+```
+
+Si PostgreSQL est distant (par exemple un service CI), ajoutez `TEST_DATABASE_ALLOW_REMOTE=1` après avoir vérifié
+que l'URL vise bien une base jetable dédiée aux tests. La suite refuse `APP_ENV=production`.
 
 ```
 pip install -r tests/requirements.txt
@@ -149,7 +157,8 @@ Le numéro d'un ticket est `lettre du service` + numéro du jour sur 3 chiffres 
   "name": "Dépôt",
   "opening_time": "08:00",
   "closing_time": "16:00",
-  "ticket_cutoff_time": null,
+  "ticket_cutoff_time": "15:30",
+  "ticket_cutoff_minutes_before_closing": 30,
   "is_open": true,
   "ticket_distribution_open": true,
   "no_show_timeout_seconds": 120
@@ -365,7 +374,7 @@ Le frontend teste `error.code` et affiche `error.message`. `details` vaut `null`
 - FIFO : le plus ancien ticket `WAITING` du service est appelé en premier.
 - Position = 1 + nombre de tickets `WAITING` du même service passés avant lui.
 - Notification « rapprochez-vous » dès qu'il reste 10 personnes ou moins devant un ticket en attente.
-- Un ticket n'est créé qu'entre l'ouverture (incluse) et `ticket_cutoff_time` (exclue) si configurée, sinon jusqu'à la fermeture (exclue), heure `Africa/Dakar`.
+- Un ticket n'est créé qu'entre l'ouverture (incluse) et la limite de prise (exclue), heure `Africa/Dakar`. Par défaut, la limite est 30 minutes avant la fermeture ; l'avance est configurable par service (`ticket_cutoff_minutes_before_closing`). Si elle couvre toute la durée d'ouverture, aucun ticket n'est délivré.
 - À la fermeture (ou le lendemain), les tickets `WAITING`, `CALLED` et `IN_PROGRESS` passent à `EXPIRED`.
 - Absence : refusée tant que le délai du service n'est pas écoulé ; le ticket suivant est appelé automatiquement.
 - Réactivation : seulement depuis `NO_SHOW`, service ouvert, ticket replacé en fin de file.
@@ -472,12 +481,12 @@ Un agent appelle le suivant avec `POST /api/counters/{son_counter_id}/next`, pui
 
 ### POST /api/services (201)
 ```json
-{"name": "Conseil", "opening_time": "08:00", "closing_time": "16:00", "no_show_timeout_seconds": 120}
+{"name": "Conseil", "opening_time": "08:00", "closing_time": "16:00", "ticket_cutoff_minutes_before_closing": 30, "no_show_timeout_seconds": 120}
 ```
 `opening_time` doit précéder `closing_time` (sinon 422). Réponse : le même format que `GET /api/services/{id}`.
 
 ### PATCH /api/services/{id}
-Champs facultatifs : `name`, `opening_time`, `closing_time`, `ticket_cutoff_time` (`HH:MM`, `null` pour supprimer), `no_show_timeout_seconds`, `is_active` (`false` retire le service de la liste publique).
+Champs facultatifs : `name`, `opening_time`, `closing_time`, `ticket_cutoff_minutes_before_closing` (0 à 1440, 30 par défaut ; 0 autorise la prise jusqu'à la fermeture), `ticket_cutoff_time` (`HH:MM` pour un override précis, `null` pour revenir à l'avance configurée), `no_show_timeout_seconds`, `is_active` (`false` retire le service de la liste publique). La réponse expose l'heure effective dans `ticket_cutoff_time`.
 
 ### POST /api/counters (201), PATCH /api/counters/{id}
 `{"name": "Guichet 3", "service_id": 1}` ; `PATCH` : `name`, `is_active`.
@@ -515,7 +524,7 @@ Tableau de bord du jour (filtre facultatif `service_id`) :
 |---|---|
 | `DATABASE_URL` | Connexion PostgreSQL (obligatoire) |
 | `APP_ENV` | `production` en déploiement. |
-| `SECRET_KEY` | Clé de signature JWT ; obligatoire si `APP_ENV=production`. |
+| `SECRET_KEY` | Clé JWT d'au moins 32 caractères et non placeholder en production. |
 | `CORS_ORIGINS` | Origines frontend autorisées, séparées par des virgules. |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | Créent le premier compte administrateur au démarrage s'il n'existe pas. |
 | `SEED_DEMO_ACCOUNTS=true` | Crée `agent1@samafile.sn` (guichet 1), `agent2@samafile.sn` (guichet 2) et `usager@samafile.sn`. |
@@ -525,7 +534,7 @@ Tableau de bord du jour (filtre facultatif `service_id`) :
 Exemple de lancement pour le développement et la démonstration :
 ```bash
 docker run -d --name backend_ci --network samafile -p 8000:8000 \
-  -e SECRET_KEY=une-longue-valeur-secrete \
+  -e SECRET_KEY="$(openssl rand -hex 32)" \
   -e ADMIN_EMAIL=admin@samafile.sn -e ADMIN_PASSWORD=UnMotDePasseSolide1 \
   -e SEED_DEMO_ACCOUNTS=true \
   samafile/backend

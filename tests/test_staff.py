@@ -218,6 +218,10 @@ def test_admin_creates_and_updates_service(client, anon_client):
     assert len(anon_client.get("/api/services").json()) == 2
     client.patch(f"/api/services/{service['id']}", json={"is_active": False})
     assert len(anon_client.get("/api/services").json()) == 1
+    all_services = client.get("/api/admin/services")
+    assert all_services.status_code == 200
+    assert {row["id"] for row in all_services.json()} == {1, service["id"]}
+    assert next(row for row in all_services.json() if row["id"] == service["id"])["is_active"] is False
 
 
 def test_service_validation(client):
@@ -242,6 +246,7 @@ def test_service_and_counter_management_is_admin_only(client):
     user = make_user_client()
     service = {"name": "X", "opening_time": "08:00", "closing_time": "16:00"}
     for caller in (agent, user):
+        assert caller.get("/api/admin/services").status_code == 403
         assert caller.post("/api/services", json=service).status_code == 403
         assert caller.patch("/api/services/1", json={"name": "Y"}).status_code == 403
         assert caller.post("/api/counters", json={"name": "X", "service_id": 1}).status_code == 403

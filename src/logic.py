@@ -1,6 +1,6 @@
 """Règles métier de SamaFile (FIFO, horaires, absence, expiration)."""
 import math
-from datetime import datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -85,8 +85,41 @@ def is_open(service: models.Service) -> bool:
 
 
 def is_ticket_distribution_open(service: models.Service) -> bool:
-    cutoff = service.ticket_cutoff_time or service.closing_time
-    return service.opening_time <= now_local().time() < cutoff
+    return _ticket_distribution_open_at(service, now_local())
+
+
+def _ticket_distribution_open_at(service: models.Service, local_now: datetime) -> bool:
+    cutoff = ticket_cutoff_time(service)
+    return service.opening_time <= local_now.time() < cutoff
+
+
+def ticket_cutoff_time(service: models.Service) -> dtime:
+    """Heure effective : override historique ou fermeture moins l'avance configurée."""
+    if service.ticket_cutoff_time is not None:
+        return service.ticket_cutoff_time
+    base_date = date(2000, 1, 2)
+    opening = datetime.combine(base_date, service.opening_time)
+    closing = datetime.combine(base_date, service.closing_time)
+    cutoff = closing - timedelta(minutes=service.ticket_cutoff_minutes_before_closing)
+    # Une marge couvrant toute la durée du service ferme la distribution dès l'ouverture.
+    return max(cutoff, opening).time()
+
+
+def ticket_cutoff_margin(service: models.Service) -> int:
+    if service.ticket_cutoff_time is None:
+        return service.ticket_cutoff_minutes_before_closing
+    closing = datetime.combine(date(2000, 1, 2), service.closing_time)
+    cutoff = datetime.combine(date(2000, 1, 2), service.ticket_cutoff_time)
+    return int((closing - cutoff).total_seconds() // 60)
+
+
+def _ticket_distribution_closed_error(service: models.Service, local_now: datetime) -> ApiError:
+    if local_now.time() < service.opening_time:
+        message = f"Le service n'est pas encore ouvert. Ouverture à {service.opening_time:%H:%M}."
+    else:
+        cutoff = ticket_cutoff_time(service)
+        message = f"La distribution des tickets est terminée depuis {cutoff:%H:%M}."
+    return ApiError(409, "SERVICE_CLOSED", message)
 
 
 def service_out(service: models.Service) -> schemas.ServiceOut:
@@ -96,7 +129,8 @@ def service_out(service: models.Service) -> schemas.ServiceOut:
         name=service.name,
         opening_time=service.opening_time.strftime("%H:%M"),
         closing_time=service.closing_time.strftime("%H:%M"),
-        ticket_cutoff_time=service.ticket_cutoff_time.strftime("%H:%M") if service.ticket_cutoff_time else None,
+        ticket_cutoff_time=ticket_cutoff_time(service).strftime("%H:%M"),
+        ticket_cutoff_minutes_before_closing=ticket_cutoff_margin(service),
         is_open=open_now,
         ticket_distribution_open=is_ticket_distribution_open(service),
         no_show_timeout_seconds=service.no_show_timeout_seconds,
@@ -114,7 +148,7 @@ def record_status_change(db: Session, ticket: models.Ticket, previous: Optional[
     ))
 
 
-def expire_if_needed(db: Session, service: models.Service) -> None:
+def expire_if_needed(db: Session, service: models.Service, *, commit: bool = True) -> None:
     """RM-04 : à la fermeture (ou le lendemain), tout ticket actif passe à EXPIRED."""
     closed = now_local().time() >= service.closing_time
     today = now_local().date()
@@ -131,7 +165,11 @@ def expire_if_needed(db: Session, service: models.Service) -> None:
             record_status_change(db, ticket, previous, EXPIRED)
             changed = True
     if changed:
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            # Flush without releasing any row locks held by the caller.
+            db.flush()
 
 
 def expire_all(db: Session, service_id: Optional[int] = None) -> None:
@@ -218,23 +256,32 @@ def create_ticket(
 ) -> models.Ticket:
     service = get_service(db, service_id)
     expire_if_needed(db, service)
-    if not is_ticket_distribution_open(service):
-        if now_local().time() < service.opening_time:
-            message = f"Le service n'est pas encore ouvert. Ouverture à {service.opening_time:%H:%M}."
-        else:
-            cutoff = service.ticket_cutoff_time or service.closing_time
-            message = f"La distribution des tickets est terminée depuis {cutoff:%H:%M}."
-        raise ApiError(409, "SERVICE_CLOSED", message)
+    local_now = now_local()
+    if not _ticket_distribution_open_at(service, local_now):
+        raise _ticket_distribution_closed_error(service, local_now)
 
     # Sérialise la numérotation par service : évite deux mêmes numéros en cas de créations simultanées.
     db.execute(text("SELECT pg_advisory_xact_lock(CAST(:service_id AS BIGINT))"), {"service_id": service.id})
+    # L'attente du verrou peut franchir l'heure limite ou minuit. Revalider
+    # l'horaire et calculer numéro/date depuis le même instant après le verrou.
+    local_now = now_local()
+    if not _ticket_distribution_open_at(service, local_now):
+        raise _ticket_distribution_closed_error(service, local_now)
+    day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    next_day_start = day_start + timedelta(days=1)
+    day_start_utc = day_start.astimezone(timezone.utc).replace(tzinfo=None)
+    next_day_start_utc = next_day_start.astimezone(timezone.utc).replace(tzinfo=None)
     created_today = (
         db.query(func.count(models.Ticket.id))
-        .filter(models.Ticket.service_id == service.id, models.Ticket.created_at >= start_of_local_day_utc())
+        .filter(
+            models.Ticket.service_id == service.id,
+            models.Ticket.created_at >= day_start_utc,
+            models.Ticket.created_at < next_day_start_utc,
+        )
         .scalar()
     )
     letter = chr(ord("A") + (service.id - 1) % 26)
-    now = now_utc()
+    now = local_now.astimezone(timezone.utc).replace(tzinfo=None)
     ticket = models.Ticket(
         ticket_number=f"{letter}{created_today + 1:03d}",
         service_id=service.id,
@@ -287,7 +334,9 @@ def call_next(db: Session, counter_id: int, actor_id: Optional[int] = None) -> m
         raise ApiError(404, "COUNTER_NOT_FOUND", "Guichet introuvable.")
     if not counter.is_active:
         raise ApiError(409, "COUNTER_INACTIVE", "Ce guichet est inactif.")
-    expire_if_needed(db, counter.service)
+    # Keep the counter lock until this call commits. Expiration must not commit
+    # midway through the critical section, or concurrent calls could bypass BUSY.
+    expire_if_needed(db, counter.service, commit=False)
 
     busy = (
         db.query(models.Ticket)
@@ -305,6 +354,7 @@ def call_next(db: Session, counter_id: int, actor_id: Optional[int] = None) -> m
         .first()
     )
     if ticket is None:
+        db.commit()
         raise ApiError(409, "QUEUE_EMPTY", "Aucun ticket en attente.")
 
     previous = ticket.status
@@ -322,9 +372,21 @@ def apply_action(
 ) -> Tuple[models.Ticket, Optional[models.Ticket]]:
     """Applique start / complete / no_show / cancel / reactivate.
     Renvoie (ticket, ticket_appelé_automatiquement) ; le second n'existe que pour no_show (RM-08)."""
-    ticket = get_ticket(db, ticket_id)
+    ticket = (
+        db.query(models.Ticket)
+        .filter(models.Ticket.id == ticket_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if ticket is None:
+        raise ApiError(404, "TICKET_NOT_FOUND", "Ticket introuvable.")
+    expire_if_needed(db, ticket.service, commit=False)
     allowed_from, target = TRANSITIONS[action]
     if ticket.status not in allowed_from:
+        if ticket.status == EXPIRED:
+            # Persist a lazy expiry even though the requested action is refused.
+            db.commit()
         raise ApiError(
             409,
             "INVALID_TRANSITION",
@@ -406,6 +468,7 @@ def create_service(db: Session, payload: schemas.ServiceCreate) -> models.Servic
         opening_time=opening,
         closing_time=closing,
         ticket_cutoff_time=cutoff,
+        ticket_cutoff_minutes_before_closing=payload.ticket_cutoff_minutes_before_closing,
         no_show_timeout_seconds=payload.no_show_timeout_seconds,
         is_active=True,
     )
@@ -426,6 +489,10 @@ def update_service(db: Session, service_id: int, data: dict) -> models.Service:
     service.opening_time = opening
     service.closing_time = closing
     service.ticket_cutoff_time = cutoff
+    if "ticket_cutoff_minutes_before_closing" in data:
+        service.ticket_cutoff_minutes_before_closing = data["ticket_cutoff_minutes_before_closing"]
+        if "ticket_cutoff_time" not in data:
+            service.ticket_cutoff_time = None
     if data.get("name") is not None:
         service.name = data["name"].strip()
     if data.get("no_show_timeout_seconds") is not None:
